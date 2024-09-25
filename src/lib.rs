@@ -5,6 +5,7 @@ use compact_str::CompactString as SmallStr;
 
 pub type LanguageId = usize;
 
+#[cfg_attr(test, derive(PartialEq))]
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Duplicated key `{0}`")]
@@ -20,7 +21,10 @@ pub enum Error {
     #[error("Language not found: `{0}`")]
     MissingLanguage(SmallStr),
     #[error("Replacement error: `{0}`")]
-    AhoCorasick(#[from] aho_corasick::MatchError),
+    AhoCorasickMatch(#[from] aho_corasick::MatchError),
+    // Note: this is a stringified version of `aho_corasick::MatchError` since it does not implement PartialEq
+    #[error("Replacement error: `{0}`")]
+    AhoCorasickBuild(String),
 }
 
 pub struct Translator {
@@ -32,6 +36,7 @@ pub struct Translator {
 }
 
 struct Translation {
+    // TODO: store arguments in descending order
     /// Arguments to be inserted into the given phrase.
     arguments: Box<[SmallStr]>,
     // LanguageId refers to the index of the given language in `Translator::languages`.
@@ -124,7 +129,7 @@ impl Translator {
             .languages
             .iter()
             .position(|lang| *lang == language)
-            .ok_or_else(|| Error::MissingKey(language.into()))?;
+            .ok_or_else(|| Error::UnknownLanguage(language.into()))?;
         let message_to_translate = &translation.translations[&language_id];
 
         let mut arguments = Vec::new();
@@ -149,7 +154,8 @@ impl Translator {
         }
 
         // TODO: cache AhoCorasick automatons, or store them directly instead of Strings
-        let ac = AhoCorasick::new(arguments).unwrap();
+        let ac =
+            AhoCorasick::new(arguments).map_err(|err| Error::AhoCorasickBuild(err.to_string()))?;
 
         ac.try_replace_all(message_to_translate, &values_to_replace)
             .map_err(Into::into)
@@ -161,22 +167,63 @@ mod tests {
     use crate::{Error, Translator};
 
     #[test]
-    fn igorcafe() -> Result<(), Error> {
-        let mut tr = Translator::new(["pt", "en"]);
+    fn one_argument() -> Result<(), Error> {
+        let mut tr = Translator::new(["pt", "en", "it"]);
 
         tr.add_text(
             "greetings",
             ["NAME"],
             [
-                ("pt", "NAME rebolou gostoso pros cria"),
-                ("en", "NAME danced really well for the kids."),
+                ("en", "Good morning, NAME!"),
+                ("pt", "Bom dia, NAME!"),
+                ("it", "Buongiorno, NAME!"),
             ],
         )?;
 
-        let translated = tr.translate("greetings", "pt", [("NAME", "igorcafe")])?;
-        dbg!(&translated);
+        assert_eq!(
+            tr.translate("greetings", "pt", [("NAME", "Julian")])?,
+            "Bom dia, Julian!"
+        );
+        assert_eq!(
+            tr.translate("greetings", "en", [("NAME", "Julian")])?,
+            "Good morning, Julian!"
+        );
+        assert_eq!(
+            tr.translate("greetings", "it", [("NAME", "Julian")])?,
+            "Buongiorno, Julian!"
+        );
 
-        assert_eq!(translated, "igorcafe rebolou gostoso pros cria");
+        // Validations
+        assert_eq!(
+            tr.translate("greetings", "cz", [("NAME", "Julian")]),
+            Err(Error::UnknownLanguage("cz".into()))
+        );
+        assert_eq!(
+            tr.translate("greetings", "pt", [("NOME", "Julian")]),
+            Err(Error::UnknownArgument("NOME".into()))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn overlapping_arguments() -> Result<(), Error> {
+        let mut tr = Translator::new(["pt", "en", "it"]);
+
+        tr.add_text(
+            "greetings",
+            ["NAME", "NAME2"],
+            [
+                ("en", "Good morning, NAME! Good afternoon, NAME2!"),
+                ("pt", "Bom dia, NAME! Boa tarde, NAME2!"),
+                ("it", "Buongiorno, NAME! Buon pomeriggio, NAME2!"),
+            ],
+        )?;
+
+        // TODO: disallow this
+        dbg!(
+            tr.translate("greetings", "pt", [("NAME", "Julian"), ("NAME2", "Kyle")])?
+        );
 
         Ok(())
     }
