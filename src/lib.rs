@@ -9,6 +9,8 @@ pub type LanguageId = usize;
 pub enum Error {
     #[error("Duplicated key `{0}`")]
     DuplicatedKey(SmallStr),
+    #[error("Duplicated argument `{0}`")]
+    DuplicatedArgument(SmallStr),
     #[error("Unknown language key: `{0}`")]
     UnknownLanguage(SmallStr),
     #[error("Unknown argument: `{0}`")]
@@ -17,6 +19,8 @@ pub enum Error {
     MissingKey(SmallStr),
     #[error("Language not found: `{0}`")]
     MissingLanguage(SmallStr),
+    #[error("Replacement error: `{0}`")]
+    AhoCorasick(#[from] aho_corasick::MatchError),
 }
 
 pub struct Translator {
@@ -56,7 +60,6 @@ impl Translator {
         I2: IntoIterator<Item = (S1, S2)>,
     >(
         &mut self,
-        // TODO: make generic
         key: S3,
         arguments: I1,
         translations: I2,
@@ -66,7 +69,7 @@ impl Translator {
             return Err(Error::DuplicatedKey(key.clone()));
         }
 
-        let arguments: Box<[SmallStr]> = arguments.into_iter().map(Into::into).collect();
+        let arguments = arguments.into_iter().map(Into::into).collect();
 
         let mut processed_translations = HashMap::with_capacity(self.languages.len());
 
@@ -77,9 +80,21 @@ impl Translator {
                 .languages
                 .iter()
                 .position(|lang| lang == language_key)
-                .ok_or(Error::UnknownLanguage(language_key))?;
+                .ok_or_else(|| Error::UnknownLanguage(language_key.clone()))?;
 
-            processed_translations.insert(language_id, message.into());
+            let is_duplicate = processed_translations
+                .insert(language_id, message.into())
+                .is_some();
+
+            if is_duplicate {
+                return Err(Error::DuplicatedKey(language_key));
+            }
+        }
+
+        if processed_translations.len() < self.languages.len() {
+            return Err(Error::MissingLanguage(
+                "Not all languages have translations".into(),
+            ));
         }
 
         let translation = Translation {
@@ -87,7 +102,6 @@ impl Translator {
             translations: processed_translations,
         };
 
-        // TODO: Check if we have enough translations
         // TODO: Check if we have duplicate translations
         self.translations.insert(key, translation);
 
@@ -124,10 +138,10 @@ impl Translator {
                 .arguments
                 .iter()
                 .find(|arg| *arg == argument_received)
-                .ok_or_else(|| Error::UnknownLanguage(argument_received.clone()))?;
+                .ok_or_else(|| Error::UnknownArgument(argument_received.clone()))?;
 
             if arguments.contains(&argument_received) {
-                panic!("Duplicated argument")
+                return Err(Error::DuplicatedArgument(argument_received));
             } else {
                 arguments.push(argument_received);
                 values_to_replace.push(value_to_replace.into());
@@ -137,9 +151,8 @@ impl Translator {
         // TODO: cache AhoCorasick automatons, or store them directly instead of Strings
         let ac = AhoCorasick::new(arguments).unwrap();
 
-        Ok(ac
-            .try_replace_all(&message_to_translate, &values_to_replace)
-            .unwrap())
+        ac.try_replace_all(message_to_translate, &values_to_replace)
+            .map_err(Into::into)
     }
 }
 
@@ -148,7 +161,7 @@ mod tests {
     use crate::{Error, Translator};
 
     #[test]
-    fn igorcafe()  -> Result<(), Error> {
+    fn igorcafe() -> Result<(), Error> {
         let mut tr = Translator::new(["pt", "en"]);
 
         tr.add_text(
@@ -159,12 +172,12 @@ mod tests {
                 ("en", "NAME danced really well for the kids."),
             ],
         )?;
-    
+
         let translated = tr.translate("greetings", "pt", [("NAME", "igorcafe")])?;
         dbg!(&translated);
-    
+
         assert_eq!(translated, "igorcafe rebolou gostoso pros cria");
-    
+
         Ok(())
     }
 }
